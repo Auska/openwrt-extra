@@ -1,0 +1,11 @@
+
+config minivtun
+	option enabled '0'
+	option network 'go0'
+	option server '17.17.17.17'
+	option server_port '1717'
+	option password 'WaWaWaWa'
+	option algorithm 'aes-128'
+	option local_ipaddr '10.6.0.11'
+	option local_netmask '255.255.255.0'
+
