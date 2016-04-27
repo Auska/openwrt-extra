@@ -1,0 +1,58 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2008-2012 OpenWrt.org
+
+START=99
+STOP=15
+SERVICE_WRITE_PID=1
+SERVICE_DAEMONIZE=1
+SERVICE_UID='root'
+
+EDGE_EXEC="/usr/sbin/edge"
+SUPERNODE_EXEC="/usr/sbin/supernode"
+OPTIONS=""
+
+start_instance() {
+	local cfg="$1"
+
+	config_get type "$cfg" TYPE
+
+	case "$type" in
+	  edge)
+        config_get_bool enabled "$cfg" 'enabled' '0'
+        [ "$enabled" = "0" ] && return 1
+        config_get tunname "$cfg" 'tunname'
+        config_get mode "$cfg" 'mode'
+		config_get ipaddr "$cfg" 'ipaddr'
+        config_get netmask "$cfg" 'netmask'
+        config_get macaddr "$cfg" 'macaddr'
+		config_get supernode "$cfg" 'supernode'
+		config_get port "$cfg" 'port'
+		config_get community "$cfg" 'community'
+		config_get key "$cfg" 'key'
+		config_get_bool route "$cfg" 'route' '0'
+		[ "$route" = "1" ] && args='-r'
+        [ "$mode" = 'dhcp' ] && ipaddr='0.0.0.0'
+        [ -z "$macaddr" ] && macaddr='04:B2:54:F1:0E:A0'
+        OPTIONS="-d $tunname -a ${mode}:${ipaddr} -c $community $([ -n \"$key\" ] && echo -k $key) -s ${netmask} -m $macaddr -l ${supernode}:${port} $args"
+        service_start $EDGE_EXEC $OPTIONS
+		;;
+	  supernode)
+        config_get_bool enabled "$cfg" 'enabled' '0'
+        [ "$enabled" = "0" ] && return 1
+		config_get port "$cfg" port
+		OPTIONS="-l $port"
+        service_start $SUPERNODE_EXEC $OPTIONS
+		;;
+	esac
+}
+
+start() {
+	config_load 'n2n_v2'
+	config_foreach start_instance 'edge'
+	config_foreach start_instance 'supernode'
+}
+
+stop() {
+	killall -9 edge >/dev/null 2>&1
+    killall -9 supernode >/dev/null 2>&1
+}

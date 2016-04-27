@@ -1,116 +1,191 @@
 #!/bin/sh /etc/rc.common
 
 START=95
-STOP=95
 
-ss_local_PID_FILE="/var/run/ss-local.pid"
-ss_redir_PID_FILE="/var/run/ss-redir.pid"
-ipset_blacklist="/etc/ipset/blacklist"
-ipset_whitelist="/etc/ipset/whitelist"
+IPSET_BLACKLIST="/etc/ipset/blacklist"
+IPSET_WHITELIST="/etc/ipset/whitelist"
+IPSET_RESERVE="/etc/ipset/reserve"
 
 start() {
-    # HACK fd
-    ulimit -n 4096
 
+	ulimit -n 1024
+	
 	config_load "shadowsocks"
-	local enabled remote rport lport pass redir_enabled redir_port \
-        whitelist_enabled blacklist_enabled 
 	config_get enabled config enabled
-	config_get remote config remote_server
-	config_get rport config remote_port
-	config_get lport config local_port
+	config_get remote_server config remote_server
+	config_get remote_port config remote_port
+	config_get local_port config local_port
 	config_get cipher config cipher
-	config_get pass config password
+	config_get password config password
+	config_get timeout config timeout
 	config_get redir_enabled config redir_enabled
 	config_get redir_port config redir_port
 	config_get whitelist_enabled config whitelist_enabled
 	config_get blacklist_enabled config blacklist_enabled
+	config_get udp_enabled config udp_enabled
+	config_get tunnel_enabled config tunnel_enabled
+	config_get tunnel_port config tunnel_port
+	config_get tunnel_forward config tunnel_forward
+	config_get ota_enabled config ota_enabled
+	config_get alt_enabled config alt_enabled
+	config_get alt_server config alt_server
+	config_get alt_port config alt_port
+	config_get alt_passwd config alt_passwd
+	config_get alt_cipher config alt_cipher
+	config_get alt_timeout config alt_timeout
+	config_get alt_ota_enabled config alt_ota_enabled
+	config_get alt_redir_port config alt_redir_port
 
-	[ -z "$remote" ] || [ -z "$rport" ] || [ -z "$lport" ] || [ -z "$pass" ] && {
-		echo "missing parameters. check config"
-		return 1
-	}
-
-#	remoteip="`ping -q -w1 $remote | grep PING | sed -e "s/).*//" | sed -e "s/.*(//"`"
-	remoteip="`resolveip -4 -t10 $remote`"
-	[ -z "$remoteip" ] && {
+	remote_server="`resolveip -4 -t10 $remote_server`"
+	[ -z "$remote_server" ] && {
 		echo "cannot resolve the server hostname"
 		return 1
 	}
 
+	[ "$ota_enabled" != '1' ] && unset ota_enabled
+	
+	if [ "$alt_enabled" != '1' ]; then
+                unset alt_server
+                unset alt_port
+                unset alt_passwd
+                unset alt_cipher
+                unset alt_timeout
+                unset alt_ota_enabled
+                unset alt_redir_port
+        else
+                alt_server="`resolveip -4 -t4 $alt_server`"
+                [ -z "$alt_server" ] && {
+                        echo "cannot resolve the alternative server hostname"
+                        return 1
+                }
+        fi
+
+	[ "$alt_ota_enabled" != '1' ] && unset alt_ota_enabled
+
 	[ "$enabled" = '1' ] && {
-		service_start /usr/bin/ss-local \
-			-s "$remoteip" \
-			-b 0.0.0.0 \
-			-p "$rport" \
-			-l "$lport" \
-			${cipher:+-m $cipher} \
-			-k "$pass" \
-			-u \
-			-f "$ss_local_PID_FILE"
+		/usr/bin/ss-local \
+			-b "0.0.0.0" \
+			-s "$remote_server" \
+			-p "$remote_port" \
+			-l "$local_port" \
+			-m "$cipher" \
+			-k "$password" \
+			-t "$timeout" \
+			${ota_enabled:+-A} \
+			-u &
+	}
+
+	[ "$tunnel_enabled" = '1' ] && {
+
+		ARGS="-b "0.0.0.0" \
+			  -s "${alt_server:-$remote_server}" \
+			  -p "${alt_port:-$remote_port}" \
+			  -l "$tunnel_port" \
+			  -L "$tunnel_forward" \
+			  -m "${alt_cipher:-$cipher}" \
+			  -k "${alt_passwd:-$password}" \
+			  -t "${alt_timeout:-$timeout}""
+
+
+		if [ "$alt_enabled" = '0' ];then
+			ARGS="$ARGS -u ${ota_enabled:+-A}"
+		else
+			ARGS="$ARGS -U ${alt_ota_enabled:+-A}"
+		fi
+
+		/usr/bin/ss-tunnel $ARGS &
 	}
 
 	[ "$redir_enabled" = '1' ] && {
-		service_start /usr/bin/ss-redir \
-			-s "$remoteip" \
-			-b 0.0.0.0 \
-			-p "$rport" \
+		/usr/bin/ss-redir \
+			-b "0.0.0.0" \
+			-s "$remote_server" \
+			-p "$remote_port" \
 			-l "$redir_port" \
-			${cipher:+-m $cipher} \
-			-k "$pass" \
-			-f "$ss_redir_PID_FILE"
+			-m "$cipher" \
+			-k "$password" \
+			-t "$timeout" \
+			${ota_enabled:+-A} \
+			-u &
 		
+		[ -n "`iptables-save | grep SHADOWSOCKS`" ] && cleanup
 		iptables -t nat -N SHADOWSOCKS
-        #iptables -t mangle -N SHADOWSOCKS
-		iptables -t nat -A SHADOWSOCKS -d 0.0.0.0/8 -j RETURN
-		iptables -t nat -A SHADOWSOCKS -d 10.0.0.0/8 -j RETURN
-		iptables -t nat -A SHADOWSOCKS -d 127.0.0.0/8 -j RETURN
-		iptables -t nat -A SHADOWSOCKS -d 169.254.0.0/16 -j RETURN
-		iptables -t nat -A SHADOWSOCKS -d 172.16.0.0/12 -j RETURN
-		iptables -t nat -A SHADOWSOCKS -d 192.168.0.0/16 -j RETURN
-		iptables -t nat -A SHADOWSOCKS -d 224.0.0.0/4 -j RETURN
-		iptables -t nat -A SHADOWSOCKS -d 240.0.0.0/4 -j RETURN
-		iptables -t nat -A SHADOWSOCKS -d $remoteip -j RETURN
 
 		[ "$blacklist_enabled" = '1' ] && {
-			sed -e "s/^/-A blacklist &/g" -e "1 i\-N blacklist nethash --hashsize 64" $ipset_blacklist | ipset -R -!
-			iptables -t nat -A SHADOWSOCKS -p tcp -m set --match-set blacklist src -j RETURN
+			sed -e "s/^/-A blacklist &/g" \
+				-e "1 i\-N blacklist nethash" \
+				$IPSET_BLACKLIST | ipset -R -!
+			iptables -t nat -A SHADOWSOCKS -p tcp -m set --match-set blacklist src \
+				-j RETURN
 		}
 
 		if [ "$whitelist_enabled" = '1' ];then
-			sed -e "s/^/-A whitelist &/g" -e "1 i\-N whitelist nethash --hashsize 4096" $ipset_whitelist | ipset -R -!
-			iptables -t nat -A SHADOWSOCKS -p tcp -m set ! --match-set whitelist dst -j REDIRECT --to-ports $redir_port
+			(cat $IPSET_RESERVE;cat $IPSET_WHITELIST) |
+			sed -e "s/^/-A whitelist &/g" \
+				-e "1 i\-N whitelist nethash" |
+			ipset -R -!
 		else
-			iptables -t nat -A SHADOWSOCKS -p tcp -j REDIRECT --to-ports $redir_port
-        fi
+			(cat $IPSET_RESERVE) |
+			sed -e "s/^/-A whitelist &/g" \
+				-e "1 i\-N whitelist nethash" |
+			ipset -R -!
+		fi
+
+		ipset -! add whitelist $remote_server
+		[ "$alt_enabled" = '1' ] && ipset -! add whitelist $alt_server
+
+		iptables -t nat -A SHADOWSOCKS -p tcp -m set ! --match-set whitelist dst \
+				-j REDIRECT --to-ports $redir_port
+
+		[ "$udp_enabled" = '1' ] && {
+
+			[ "$alt_enabled" = '1' ] && {
+				redir_port=$alt_redir_port
+				/usr/bin/ss-redir \
+					-b "0.0.0.0" \
+					-s "$alt_server" \
+					-p "$alt_port" \
+					-l "$alt_redir_port" \
+					-m "$alt_cipher" \
+					-k "$alt_passwd" \
+					-t "$alt_timeout" \
+					${alt_ota_enabled:+-A} \
+					-U &
+			}
+
+			ip rule add fwmark 0x01/0x01 table 100
+			ip route add local 0.0.0.0/0 dev lo table 100
+			iptables -t mangle -N SS_UDP
+
+			if [ "$blacklist_enabled" = '1' ];then
+				iptables -t mangle -A SS_UDP -p udp -m set --match-set blacklist src \
+					-j RETURN
+			fi
+			iptables -t mangle -A SS_UDP -p udp -m set ! --match-set whitelist dst \
+					-j TPROXY --on-port $redir_port --tproxy-mark 0x01/0x01
+			
+			iptables -t mangle -A PREROUTING -p udp -j SS_UDP
+		}
+
 		iptables -t nat -I zone_lan_prerouting -j SHADOWSOCKS
-        ##tproxy udprelay
-        #ip rule add fwmark 0x01/0x01 table 100
-        #ip route add local 0.0.0.0/0 dev lo table 100
-        #iptables -t mangle -A SHADOWSOCKS -p udp --dport 53 -j TPROXY --on-port $redir_port -tproxy-mark 0x01/0x01
-        #iptables -t mangle -I zone_lan_prerouting -j SHADOWSOCKS
-    }
+	}
 }
 
-ss_local_stop() {
-    service_stop /usr/bin/ss-local && {
-    rm "$ss_local_PID_FILE"
-    }
-}
-
-ss_redir_stop() {
-    service_stop /usr/bin/ss-redir && {
-        iptables -t nat -D zone_lan_prerouting -j SHADOWSOCKS &> /dev/null
-        iptables -t nat -F SHADOWSOCKS &> /dev/null
-        sleep 1
-        iptables -t nat -X SHADOWSOCKS &> /dev/null
-        ipset destroy whitelist &> /dev/null
-        ipset destroy blacklist &> /dev/null
-        rm "$ss_redir_PID_FILE"
-    }
+cleanup() {
+	iptables -t nat -D zone_lan_prerouting -j SHADOWSOCKS 2> /dev/null
+	iptables -t nat -F SHADOWSOCKS 2> /dev/null
+	iptables -t nat -X SHADOWSOCKS 2> /dev/null
+	iptables -t mangle -D PREROUTING -p udp -j SS_UDP 2> /dev/null
+	iptables -t mangle -F SS_UDP 2> /dev/null
+	iptables -t mangle -X SS_UDP 2> /dev/null
+	ip rule del fwmark 0x01/0x01 table 100 2>/dev/null
+	ip route del local 0.0.0.0/0 dev lo table 100 2>/dev/null
+	ipset destroy whitelist 2> /dev/null
+	ipset destroy blacklist 2> /dev/null
 }
 
 stop() {
-	ss_local_stop
-	ss_redir_stop
+	killall -q -9 ss-local
+	killall -q -9 ss-tunnel
+	killall -q -9 ss-redir && cleanup
 }

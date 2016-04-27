@@ -90,7 +90,7 @@ insert_remote_accept_rules()
 
 		for prot in $proto ; do
 			if [ -n "$local_port" ] ; then
-				
+
 				if [ -z "$remote_port"  ] ; then
 					remote_port="$local_port"
 				fi
@@ -342,7 +342,7 @@ insert_restriction_rules()
 			make_iptables_rules -p "$package_name" -s "$section" -t "$table" -c "$chain" -g "$target" $ingress
 			make_iptables_rules -p "$package_name" -s "$section" -t "$table" -c "$chain" -g "$target" $ingress -r
 
-			uci del "$package_name"."$section".connmark 2>/dev/null	
+			uci del "$package_name"."$section".connmark 2>/dev/null
 			uci del "$package_name"."$section".not_connmark	 2>/dev/null
 		fi
 	}
@@ -350,7 +350,7 @@ insert_restriction_rules()
 	config_load "$package_name"
 	config_foreach parse_rule_config "whitelist_rule"
 	config_foreach parse_rule_config "restriction_rule"
-	
+
 	rm -rf /tmp/restriction_init.lock
 }
 
@@ -382,7 +382,7 @@ initialize_quotas()
 	# and full qos is not enabled
 	if [ -z "$full_qos_enabled" ] ; then
 		restore_quotas    -w $wan_if -d $death_mark -m $death_mask -s "$lan_ip/$lan_mask" -c "0 0,4,8,12,16,20 * * * /usr/bin/backup_quotas >/dev/null 2>&1"
-		initialiaze_quota_qos
+		initialize_quota_qos
 	else
 		restore_quotas -q -w $wan_if -d $death_mark -m $death_mask -s "$lan_ip/$lan_mask" -c "0 0,4,8,12,16,20 * * * /usr/bin/backup_quotas >/dev/null 2>&1"
 		cleanup_old_quota_qos
@@ -431,7 +431,7 @@ cleanup_old_quota_qos()
 	done
 }
 
-initialiaze_quota_qos()
+initialize_quota_qos()
 {
 	cleanup_old_quota_qos
 
@@ -514,27 +514,38 @@ initialiaze_quota_qos()
 	fi
 }
 
-block_static_ip_mismatches()
+enforce_dhcp_assignments()
 {
-	block_mismatches=$(uci get firewall.@defaults[0].block_static_ip_mismatches 2> /dev/null)
-	delete_chain_from_table static_mismatch_check filter
-	if [ "$block_mismatches" = "1" ] && [ -e /etc/ethers ] ; then
-		local pairs
-		pairs=$(cat /etc/ethers | sed '/^[ \t]*$/d' | awk ' { print $1"^"$2"\n" ; } ' )
-		if [ -n "$pairs" ] ; then
-			iptables -t filter -N static_mismatch_check
-			local p
-			for p in $pairs ; do
-				local mac
-				local ip
-				mac=$(echo $p | sed 's/\^.*$//g')
-				ip=$(echo $p | sed 's/^.*\^//g')
-				if [ -n "$ip" ] && [ -n "$mac" ] ; then
-					iptables -t filter -A static_mismatch_check  ! -s  "$ip"  -m mac --mac-source  "$mac"  -j REJECT
-				fi
-			done
-			iptables -t filter -I delegate_forward -j static_mismatch_check
-		fi
+	enforce_assignments=$(uci get firewall.@defaults[0].enforce_dhcp_assignments 2> /dev/null)
+	delete_chain_from_table lease_mismatch_check filter
+
+	local pairs1
+	local pairs2
+	local pairs
+	pairs1=""
+	pairs2=""
+	if [ -e /tmp/dhcp.leases ] ; then
+		pairs1=$(cat /tmp/dhcp.leases | sed '/^[ \t]*$/d' | awk ' { print $2"^"$3"\n" ; } ' )
+	fi
+	if [ -e /etc/ethers ] ; then
+		pairs2=$(cat /etc/ethers | sed '/^[ \t]*$/d' | awk ' { print $1"^"$2"\n" ; } ' )
+	fi
+	pairs=$( printf "$pairs1\n$pairs2\n" | sort | uniq )
+
+
+	if [ "$enforce_assignments" = "1" ] && [ -n "$pairs" ] ; then
+		iptables -t filter -N lease_mismatch_check
+		local p
+		for p in $pairs ; do
+			local mac
+			local ip
+			mac=$(echo $p | sed 's/\^.*$//g')
+			ip=$(echo $p | sed 's/^.*\^//g')
+			if [ -n "$ip" ] && [ -n "$mac" ] ; then
+				iptables -t filter -A lease_mismatch_check  ! -s  "$ip"  -m mac --mac-source  "$mac"  -j REJECT
+			fi
+		done
+		iptables -t filter -I delegate_forward -j lease_mismatch_check
 	fi
 }
 
@@ -564,10 +575,60 @@ initialize_firewall()
 	insert_remote_accept_rules
 	insert_dmz_rule
 	create_l7marker_chain
-	block_static_ip_mismatches
+	enforce_dhcp_assignments
 	force_router_dns
 	add_adsl_modem_routes
+        isolate_guest_networks
 }
+
+
+guest_mac_from_uci()
+{
+	local is_guest_network
+	local macaddr
+	config_get is_guest_network "$1" is_guest_network
+	if [ "$is_guest_network" = "1" ] ; then
+		config_get macaddr "$1" macaddr
+		echo "$macaddr"
+	fi
+}
+get_guest_macs()
+{
+	config_load "wireless"
+	config_foreach guest_mac_from_uci "wifi-iface"
+}
+isolate_guest_networks()
+{
+	ebtables -t filter -F FORWARD
+	ebtables -t filter -F INPUT
+	local guest_macs=$( get_guest_macs )
+	if [ -n "$guest_macs" ] ; then
+		local lanifs=`brctl show br-lan 2>/dev/null | awk ' $NF !~ /interfaces/ { print $NF } '`
+		local lif
+
+		local lan_ip=$(uci -p /tmp/state get network.lan.ipaddr)
+
+		for lif in $lanifs ; do
+			for gmac in $guest_macs ; do
+				local is_guest=$(ifconfig "$lif"	2>/dev/null | grep -i "$gmac")
+				if [ -n "$is_guest" ] ; then
+					echo "$lif with mac $gmac is wireless guest"
+
+					#Allow access to WAN but not other LAN hosts for anyone on guest network
+					ebtables -t filter -A FORWARD -i "$lif" --logical-out br-lan -j DROP
+
+					#Only allow DHCP/DNS access to router for anyone on guest network
+					ebtables -t filter -A INPUT -i "$lif" -p ARP -j ACCEPT
+					ebtables -t filter -A INPUT -i "$lif" -p IPV4 --ip-protocol UDP --ip-destination-port 53 -j ACCEPT
+					ebtables -t filter -A INPUT -i "$lif" -p IPV4 --ip-protocol UDP --ip-destination-port 67 -j ACCEPT
+					ebtables -t filter -A INPUT -i "$lif" -p IPV4 --ip-destination $lan_ip -j DROP
+
+				fi
+			done
+		done
+	fi
+}
+
 
 ifup_firewall()
 {
