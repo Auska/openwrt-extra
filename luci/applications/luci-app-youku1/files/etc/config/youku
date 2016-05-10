@@ -1,0 +1,4 @@
+
+config youku 'config'
+	option	enable	'0'
+	option	mode	'0'
