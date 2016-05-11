@@ -3,7 +3,7 @@ OpenWrt-Extra
 
 Some extra packages for OpenWrt
 
-Add "src-git extra git://github.com/shangjiyu/openwrt-extra.git" to feeds.conf.default.
+Copy openwrt-extra to Packages
 
 ```bash
 ./scripts/feeds update -a
