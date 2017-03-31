@@ -1,6 +1,0 @@
-config "server"
-	option root		'/home/svnroot'
-	option port		3690
-	option addr		'0.0.0.0'
-	option memcache	'8'
-	option enabled	'1'
